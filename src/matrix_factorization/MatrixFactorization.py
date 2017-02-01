@@ -2,47 +2,51 @@ import itertools
 import numpy as np
 from pyspark.accumulators import AccumulatorParam
 from pyspark import SparkContext
-from fileinput import input
-from glob import glob
 
-
-class MatrixAccumulatorParam(AccumulatorParam):
+# class for W
+class RowAccumulatorParam(AccumulatorParam):
     def zero(self, values):
-        return dict((k,0) for k in values)
+        return np.zeros(len(values)).astype('float16')
     def addInPlace(self, value1, value2):
         # value2 is dictionary
-        # with (i,j) as key and value = gradient
-        for k in value2.keys():
-            value1[k] += value2[k]
+        # with i-th row to updated as key and
+        # value = vector of gradient descent updates
+        for i in value2.keys():
+            value1[i] += value2[i]
+        return value1
+
+# class for H
+class ColAccumulatorParam(AccumulatorParam):
+    def zero(self, values):
+        return np.zeros(len(values)).astype('float16')
+    def addInPlace(self, value1, value2):
+        # value2 is dictionary
+        # with i-th row to updated as key and
+        # value = vector of gradient descent updates
+        for j in value2.keys():
+            value1[:,j] += value2[j]
         return value1
 
 
-def SGD(x, w, k, eps, reg):
+
+def SGD(x, k, eps, reg):
     global w
-    global k
+    global h
     global mse
     global n_updates
     # for given filled position in matrix
     # i = row index (user)
     # j = column index (project)
-    i = x[0]
-    j = x[1]
+    # user IDs start at 1 but matrix index starts at 0
+    i = x[0]-1
+    # project IDs start at 1 but matrix index starts at 0
+    j = x[1]-1
 
     '''GRADIENT DESCENT'''
     # get i-th row of w (should have k columns)
-    w_i = []
-    w_i_indices = []
-    # all indices start at 1
-    for k_j in range(1,k+1):
-        w_i_indices.append((i,k_j))
-        w_i.append(w.value[(i,k_j)])
+    w_i = w.value[i]
     # get j-th column of h (should have k rows)
-    h_j = []
-    h_j_indices = []
-    # all indices start at 1
-    for k_i in range(1,k+1):
-        h_j_indices.append()
-        h_j.append(w.value[(k_i,j)])
+    h_j = h.value[:,j]
     # current prediction for V(i,j)
     dot_product = np.dot(w_i, h_j)
     # rating should be 1
@@ -52,17 +56,17 @@ def SGD(x, w, k, eps, reg):
     # if no regularization
     if reg == 0:
         # update for W
-        w_grad = np.dot(-2*error, h_j).tolist()
+        w_grad = -2*error*h_j
         # update for H
-        h_grad = np.dot(-2*error, w_i).tolist()
+        h_grad = -2*error*w_i
     else:
         # update for W with L2 loss
-        w_grad = (np.dot(-2*error, h_j) + np.dot(2*reg, w_i)).tolist()
+        w_grad = -2*error*h_j + 2*reg*w_i
         # update for H with L2 loss
-        h_grad = (np.dot(-2*error, w_i) + np.dot(2*reg, h_j)).tolist()
+        h_grad = -2*error*w_i + 2*reg*h_j
     # create update dictionaries
-    w_update = dict(zip(w_i_indices, w_grad))
-    h_update = dict(zip(h_j_indices, h_grad))
+    w_update = {i:w_grad}
+    h_update = {j:h_grad}
     # update accumulators
     w += w_update
     h += h_update
@@ -78,7 +82,7 @@ if __name__ == '__main__':
 
     '''SET PARAMETERS'''
     # get number of CPUs
-    cpus = sc.defaultParallelism
+    cpus = sc.defaultParallelism*5
     # number of users/rows
     n = 4496672
     # number of columns/projects
@@ -96,28 +100,18 @@ if __name__ == '__main__':
     # point to S3 bucket
     files = sc.textFile('s3a://github-recommender/sparse/*txt', cpus*3)
     # parse text files into RDD of tuples that represent position in matrix with 1
-    v = files.map(extract_ratings).distinct().persist()
+    v = files.map(lambda x: (int(x.split(",")[0]), int(x.split(",")[1]))).distinct().persist()
 
     '''INITIALIZE W'''
-    # create tuples of indices for W (n, k)
-    # user mappings started at 1
-    w_indices = list(itertools.product(range(1,n+1), range(1,k+1)))
     # initialize W with small random values
-    w_values = [np.random.uniform(0,1./(k*10)) for i in range(n*k)]
-    # create dictionary representation for W
-    w_dict = dict(zip(w_indices, w_values))
+    w_values = np.random.rand(n,k).astype('float16')/(k*10)
     # create accumulator for W
-    w = sc.accumulator(w_dict, MatrixAccumulatorParam())
+    w = sc.accumulator(w_values, RowAccumulatorParam())
     '''INITIALIZE H'''
-    # create tuples of indices for H (k, m)
-    # project mappings started at 1
-    h_indices = list(itertools.product(range(1,k+1), range(1,m+1)))
     # initialize H with small random values
-    h_values = [np.random.uniform(0,1./(k*10)) for i in range(k*m)]
-    # create dictionary representation for H
-    h_dict = dict(zip(h_indices, h_values))
+    h_values = np.random.rand(k,m).astype('float16')/(k*10)
     # create accumulator for H
-    h = sc.accumulator(h_dict, MatrixAccumulatorParam())
+    h = sc.accumulator(h_values, ColAccumulatorParam())
 
     '''STOCHASTIC GRADIENT DESCENT'''
     mses = []
@@ -126,7 +120,7 @@ if __name__ == '__main__':
         # create accumulator for MSE
         mse = sc.accumulator(0.0)
         # create accumulator for number of updates per epoch
-        n_updates = sc.accumulator(0.0)
+        n_updates = sc.accumulator(0)
         # shuffle V
         shuffled_v = v.map(lambda s: (random.randint(0,n*m), s)).sortByKey(True).map(lambda s: s[1]).persist()
         shuffled_v.foreach(lambda x: SGD(x, k, eps, reg))
@@ -144,9 +138,13 @@ if __name__ == '__main__':
                 mses.append(curr_mse)
         '''
         i += 1
+        if i%5 == 0:
+            '''SAVE W AND H'''
+            w_rdd = sc.parallelize(list(w.value.items()), cpus*3)
+            w_rdd.saveAsTextFile('s3a://github-recommender/W/')
+            h_rdd = sc.parallelize(list(h.value.items()), cpus*3)
+            h_rdd.saveAsTextFile('s3a://github-recommender/H/')
 
-    '''SAVE W AND H'''
-    w_rdd = sc.parallelize(list(w.value.items()), cpus*3)
-    w_rdd.saveAsTextFile('s3a://github-recommender/output/')
-    h_rdd = sc.parallelize(list(h.value.items()), cpus*3)
-    h_rdd.saveAsTextFile('s3a://github-recommender/output/')
+            '''SAVE MSE'''
+            mse_rdd = sc.parallelize(mses, cpus*3)
+            mse_rdd.saveAsTextFile('s3a://github-recommender/MSE/')
