@@ -1,4 +1,3 @@
-import itertools
 import numpy as np
 from pyspark.accumulators import AccumulatorParam
 from pyspark import SparkContext
@@ -28,8 +27,7 @@ class ColAccumulatorParam(AccumulatorParam):
         return value1
 
 
-
-def SGD(x, k, eps, reg):
+def SGD(x):
     global w
     global h
     global mse
@@ -41,7 +39,6 @@ def SGD(x, k, eps, reg):
     i = x[0]-1
     # project IDs start at 1 but matrix index starts at 0
     j = x[1]-1
-
     '''GRADIENT DESCENT'''
     # get i-th row of w (should have k columns)
     w_i = w.value[i]
@@ -56,14 +53,14 @@ def SGD(x, k, eps, reg):
     # if no regularization
     if reg == 0:
         # update for W
-        w_grad = -2*error*h_j
+        w_grad = -eps*-2*error*h_j
         # update for H
-        h_grad = -2*error*w_i
+        h_grad = -eps*-2*error*w_i
     else:
         # update for W with L2 loss
-        w_grad = -2*error*h_j + 2*reg*w_i
+        w_grad = -eps*(-2*error*h_j + 2*reg*w_i)
         # update for H with L2 loss
-        h_grad = -2*error*w_i + 2*reg*h_j
+        h_grad = -eps*(-2*error*w_i + 2*reg*h_j)
     # create update dictionaries
     w_update = {i:w_grad}
     h_update = {j:h_grad}
@@ -82,19 +79,19 @@ if __name__ == '__main__':
 
     '''SET PARAMETERS'''
     # get number of CPUs
-    cpus = sc.defaultParallelism*5
+    cpus = sc.defaultParallelism*3
     # number of users/rows
     n = 4496672
     # number of columns/projects
     m = 3253438
     # number of latent features
     k = 200
-    # learning rate
-    eps = 0.001
-    # regularization parameter
-    reg = 0
     # max iterations
-    max_iters = 1000
+    max_iters = 6
+    # learning rate
+    eps = sc.broadcast(0.001)
+    # regularization parameter
+    reg = sc.broadcast(0)
 
     '''LOAD DATA'''
     # point to S3 bucket
@@ -122,11 +119,13 @@ if __name__ == '__main__':
         # create accumulator for number of updates per epoch
         n_updates = sc.accumulator(0)
         # shuffle V
-        shuffled_v = v.map(lambda s: (random.randint(0,n*m), s)).sortByKey(True).map(lambda s: s[1]).persist()
-        shuffled_v.foreach(lambda x: SGD(x, k, eps, reg))
-        shuffled_v.unpersist()
+        # shuffled_v = v.map(lambda s: (random.randint(0,n*m), s)).sortByKey(True).map(lambda s: s[1]).persist()
+        # shuffled_v.foreach(lambda x: SGD(x, k, eps, reg))
+        # shuffled_v.unpersist()
+        v.foreach(SGD)
         # store MSE/update of this stage
         curr_mse = mse.value/n_updates.value
+        print("{}-th epoch has MSE/update of: {:.5f}".format(i, curr_mse))
         mses.append(curr_mse)
         # to check convergence
         '''
@@ -138,13 +137,24 @@ if __name__ == '__main__':
                 mses.append(curr_mse)
         '''
         i += 1
+    # save W and H every so often
         if i%5 == 0:
             '''SAVE W AND H'''
-            w_rdd = sc.parallelize(list(w.value.items()), cpus*3)
-            w_rdd.saveAsTextFile('s3a://github-recommender/W/')
-            h_rdd = sc.parallelize(list(h.value.items()), cpus*3)
-            h_rdd.saveAsTextFile('s3a://github-recommender/H/')
+            w_filename = 's3a://github-recommender/output/w_{}'.format(i)
+            np.savetxt(w_filename, w.value)
+            h_filename = 's3a://github-recommender/output/h_{}'.format(i)
+            np.savetxt(h_filename, w.value)
 
             '''SAVE MSE'''
             mse_rdd = sc.parallelize(mses, cpus*3)
-            mse_rdd.saveAsTextFile('s3a://github-recommender/MSE/')
+            mse_rdd.saveAsTextFile('s3a://github-recommender/output/mse/')
+
+    '''SAVE W AND H'''
+    w_filename = 's3a://github-recommender/output/w_{}'.format(i)
+    np.savetxt(w_filename, w.value)
+    h_filename = 's3a://github-recommender/output/h_{}'.format(i)
+    np.savetxt(h_filename, w.value)
+
+    '''SAVE MSE'''
+    mse_rdd = sc.parallelize(mses, cpus*3)
+    mse_rdd.saveAsTextFile('s3a://github-recommender/output/mse/')

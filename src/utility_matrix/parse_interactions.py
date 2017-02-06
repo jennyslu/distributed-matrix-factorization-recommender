@@ -7,39 +7,25 @@ def parse_utility_matrix(filenames):
     global user_map
     global project_map
     for filename in filenames:
-        in_file_path = 'data/' + filename
+        in_file_path = 'new_input/' + filename
         # output file
-        out_file = 'output/' + filename + '.txt'
+        out_file = 'new_output/' + filename + '.txt'
         writer = open(out_file, 'w')
-        # stars side data
-        star_file = 'side/' + filename + '.txt'
-        stars_writer = open(star_file, 'w')
         # parse file
-        with open(in_file_path, 'rb') as in_file:
+        with open(in_file_path) as in_file:
             next(in_file)
             for line in in_file:
                 #decode
-                data = json.loads(line.decode('iso8859-1'))
-                try:
-                    event = data['archive_type']
-                    project = data['projects_repo_name']
-                    user = data['archive_actor_login']
-                    i = user_map[user]
-                    j = project_map[project]
-                except KeyError:
-                    print(filename)
-                lesser = ['WatchEvent', 'DownloadEvent']
-                if event in lesser:
-                    stars_writer.write('{},{}\n'.format(i,j))
-                else:
-                    writer.write('{},{}\n'.format(i,j))
+                [event, project, user] = line.rstrip().split(',')
+                i = user_map[user]
+                j = project_map[project]
+                writer.write('{},{}\n'.format(i,j))
         writer.close()
-        stars_writer.close()
 
 def create_project_mappings():
     # read in all projects
     projects = []
-    with open('projects.csv') as f:
+    with open('input/projects.csv') as f:
         for line in f:
             projects.append(line.split(',')[0])
     # create dictionary for mapping
@@ -49,7 +35,7 @@ def create_project_mappings():
 def create_user_mappings():
     # read in all users
     users = []
-    user_files = ['users.csv', 'users1.csv']
+    user_files = ['input/users.csv', 'input/users1.csv']
     for user_file in user_files:
         with open(user_file) as f:
             next(f)
@@ -62,7 +48,7 @@ def create_user_mappings():
 def originators(project_map, user_map):
     writer = open('output/originals.txt', 'w')
     last_user_id = len(user_map)
-    with open('projects.csv') as f:
+    with open('input/projects.csv') as f:
         next(f)
         for line in f:
             repo_name = line.rstrip().split(',')[0]
@@ -86,7 +72,7 @@ if __name__ == '__main__':
     sys.setdefaultencoding('iso8859-1')
 
     # read in JSON file of all pull requests for given year for projects
-    filenames = os.listdir('data')
+    filenames = os.listdir('new_input')
 
     project_map = create_project_mappings()
     user_map = create_user_mappings()
@@ -97,6 +83,3 @@ if __name__ == '__main__':
 
     p = Pool(8)
     p.map(parse_utility_matrix, (filenames, ))
-
-    with open('project_map.json', 'w') as f:
-        json.dump(project_map, f)

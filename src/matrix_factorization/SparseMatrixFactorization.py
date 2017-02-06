@@ -57,15 +57,8 @@ def SGD(x):
         w_iter = val[1][1]
         h_iter = val[1][2]
     # dictionaries to store W and H
-    w = {}
-    h = {}
-    # get columns of H
-    for h_j in h_iter:
-        # column index as key
-        h[h_j[0]] = h_j[1]
-    for w_i in w_iter:
-        # row index as key
-        w[w_i[0]] = w_i[1]
+    w = {x[0]:x[1] for x in w_iter}
+    h = {x[0]:x[1] for x in h_iter}
     # go through V and update W and H
     for v_ij in v_iter:
         # increment num updates
@@ -114,9 +107,9 @@ if __name__ == '__main__':
     # decreasing beta will cause step size to decrease more slowly
     # increasing tau will make step size smaller overall
     beta = 0.9
-    tau = 10
+    tau = 5000
     # regularization parameter
-    reg = sc.broadcast(0)
+    reg = sc.broadcast(0.02)
 
     '''LOAD DATA'''
     # point to S3 bucket
@@ -130,12 +123,12 @@ if __name__ == '__main__':
     # first map gets tuples of (i, 1)
     # reduceByKey to get (unique row indices, number of 1's in that row)
     # second map create W with (i, row array))
-    w = v.map(lambda x: (x[0],1)).reduceByKey(lambda x,y: x+y).map(lambda x: (x[0], np.random.rand(k)))
+    w = v.map(lambda x: (x[0],1)).reduceByKey(lambda x,y: x+y).map(lambda x: (x[0], np.random.uniform(0.0001,1,k).astype('float16')))
     # initialize H
     # first map gets tuples of (j, 1)
     # reduceByKey to get (unique column indices, number of 1's in that column)
     # second map create H with (j, column array))
-    h = v.map(lambda x: (x[1],1)).reduceByKey(lambda x,y: x+y).map(lambda x: (x[0], np.random.rand(k)/))
+    h = v.map(lambda x: (x[1],1)).reduceByKey(lambda x,y: x+y).map(lambda x: (x[0], np.random.uniform(0.0001,1,k).astype('float16')))
 
     '''CALCULATE ROWS, COLUMNS, BLOCK SIZE'''
     # number of users/rows
@@ -155,7 +148,7 @@ if __name__ == '__main__':
     '''STOCHASTIC GRADIENT DESCENT'''
     for i in range(max_iters):
         # create accumulator for MSE
-        # mse = sc.accumulator(0.0)
+        mse = sc.accumulator(0.0)
         # create accumulator for number of updates per epoch
         n_updates_acc = sc.accumulator(0)
         w_accum = sc.accumulator(0)
