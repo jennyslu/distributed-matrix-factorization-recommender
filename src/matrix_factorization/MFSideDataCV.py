@@ -1,11 +1,12 @@
 import numpy as np
-import numpy.ma as ma
 from pyspark.accumulators import AccumulatorParam
 from pyspark import SparkConf, SparkContext
 
 # class for W
 class RowAccumulatorParam(AccumulatorParam):
-    '''accumulator to add values to matrix row-wise'''
+    '''
+    accumulator to add values to matrix row-wise
+    for W'''
     def zero(self, values):
         return np.zeros(len(values)).astype('float16')
     def addInPlace(self, value1, value2):
@@ -16,9 +17,11 @@ class RowAccumulatorParam(AccumulatorParam):
         value1[i] += w_i
         return value1
 
-# class for H
 class ColAccumulatorParam(AccumulatorParam):
-    '''accumulator to add values to matrix column-wise'''
+    '''
+    accumulator to add values to matrix column-wise
+    for H
+    '''
     def zero(self, values):
         return np.zeros(len(values)).astype('float16')
     def addInPlace(self, value1, value2):
@@ -29,19 +32,19 @@ class ColAccumulatorParam(AccumulatorParam):
         value1[:,j] += h_j
         return value1
 
-# helper function used to check for nans originally
 def check_nans(x):
+    '''helper function to check for nans'''
     global nanchecker
     if np.isnan(x[1]).any():
         nanchecker += 1
 
-# action to call on W to cause update to be calculated (without collect())
-def coalesce_w(x):
+def combine_w(x):
+    '''simple action to call on W to calculate updates'''
     global w_accum
     w_accum += 1
 
-# action to call on H to cause update to be calculated (without collect())
-def coalesce_h(x):
+def combine_h(x):
+    '''simple action to call on H to calculate updates'''
     global h_accum
     h_accum += 1
 
@@ -80,8 +83,6 @@ def SGD(x):
         mse += error**2
         # gradients with L2 loss
         # dictionary values are updated in place
-        h_update = step_size.value*(-2*error*w_i + 2.0*reg.value*h_j)
-        w_update = step_size.value*(-2*error*h_j + 2.0*reg.value*w_i)
         h_j -= step_size.value*(-2*error*w_i + 2.0*reg.value*h_j)
         w_i -= step_size.value*(-2*error*h_j + 2.0*reg.value*w_i)
         # increment num updates
@@ -95,6 +96,15 @@ def SGD(x):
     # return iterator of updated W and H
     return tuple((output.items()))
 
+def calc_mse(entry):
+    global cv_mse
+    i,j = entry
+    w_i = brdcst_w[i]
+    h_j = brdcst_h[j]
+    # calculate error
+    error = 5 - np.dot(w_i,h_j)
+    # increment MSE
+    cv_mse += error**2
 
 if __name__ == '__main__':
     # conf = (SparkConf()
@@ -127,18 +137,16 @@ if __name__ == '__main__':
     files = sc.textFile('s3a://github-recommender/utility/*txt', cpus)
     # parse text files into RDD of tuples that represent position in matrix with 1
     # minus 1 so indices are 0-indexed
-    v = files.map(lambda x: (int(x.split(",")[0])-1, int(x.split(",")[1])-1)).distinct()
 
-    '''LOAD SIDE DATA'''
-    side_files = sc.textFile('s3a://github-recommender/side/*txt', cpus)
-    # project side data
-    w_side = side_files.map(lambda x: (int(x.split(",")[0])-1, float(x.split(",")[1]))).groupByKey()
-    amount_side = len(w_side.first()[1])
-
-    '''SIDE DATA'''
-    mask_values = [1]*k
-    mask_values.extend([0]*)
-    mask = sc.broadcast()
+    '''TEST TRAINING SPLIT'''
+    # entire (i,j) becomes key for CV sampling purposes
+    v_keyed = files.map(lambda x: ((int(x.split(",")[0])-1, int(x.split(",")[1])-1),1)).distinct().persist()
+    split = 0.1
+    sample_size = int(v_keyed.count()*split)
+    # sample without replacement and set random seed (optional)
+    v_test_keyed = sc.parallelize(v_keyed.takeSample(False, sample_size, 42))
+    v = v_keyed.subtractByKey(v_test_keyed).map(lambda x: (x[0][0], x[0][1]))
+    v_test = v_test_keyed.map(lambda x: (x[0][0], x[0][1]))
 
     '''HALF PRECISION FLOATING POINT'''
     # 6.10352 × 10−5 (minimum positive normal)
@@ -192,7 +200,7 @@ if __name__ == '__main__':
         # should make strata with rows from x[0] block and cols from perms[x[0]]
         # filter out values that are in that row block but not in correct column block
         filtered_v = blocked_v.filter(lambda x: perms[x[0]] == assign_col_block(x[1][1])).persist()
-        # n_updates = filtered_v.count()
+        n_updates = filtered_v.count()
         # W should have same block ids as V
         blocked_w = w.keyBy(lambda x: assign_row_block(x[0]))
         # block H with the row block id each strata should match with
@@ -210,12 +218,22 @@ if __name__ == '__main__':
         w = w_h.filter(lambda x: x[0][0]=='W').map(lambda x: x[1]).persist()
         h = w_h.filter(lambda x: x[0][0]=='H').map(lambda x: x[1]).persist()
         # call action to actually compute this update!
-        w.foreach(coalesce_w)
-        h.foreach(coalesce_h)
+        w.foreach(combine_w)
+        h.foreach(combine_h)
         # append current MSE
         curr_mse = mse.value/n_updates_acc.value
         print("MSE/update for {}-th iteration is: {}".format(i, curr_mse))
         mses.append(curr_mse)
+
+    '''CROSS VALIDATION'''
+    # broadcast W and H so they can be read by workers
+    brdcst_w = sc.broadcast(w)
+    brdcst_h = sc.broadcast(h)
+    # create accumulator for cross-validated MSE
+    cv_mse = sc.accumulator(0.0)
+    # for each element in v_test see what error is
+    v_test.foreach(calc_mse)
+    print("MSE on test data: {}".format(cv_mse.value))
 
     '''SAVE RESULTS'''
     # # turn RDD into matrix and save
@@ -223,7 +241,7 @@ if __name__ == '__main__':
     # h_values = np.zeros((k,m)).astype('float16')
     # w_accum = sc.accumulator(w_values, RowAccumulatorParam())
     # h_accum = sc.accumulator(h_values, ColAccumulatorParam())
-    # w.foreach(coalesce_w)
+    # w.foreach(combine_h)
     # h.foreach(coalesce_h)
     # w_accum.value.savetxt('s3a://github-recommender/output/w.txt')
     # h_accum.value.savetxt('s3a://github-recommender/output/h.txt')
