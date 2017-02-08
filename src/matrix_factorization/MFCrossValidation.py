@@ -2,7 +2,6 @@ import numpy as np
 from pyspark.accumulators import AccumulatorParam
 from pyspark import SparkConf, SparkContext
 
-# class for W
 class RowAccumulatorParam(AccumulatorParam):
     '''
     accumulator to add values to matrix row-wise

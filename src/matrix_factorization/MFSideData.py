@@ -3,9 +3,10 @@ import numpy.ma as ma
 from pyspark.accumulators import AccumulatorParam
 from pyspark import SparkConf, SparkContext
 
-# class for W
 class RowAccumulatorParam(AccumulatorParam):
-    '''accumulator to add values to matrix row-wise'''
+    '''
+    accumulator to add values to matrix row-wise
+    for W'''
     def zero(self, values):
         return np.zeros(len(values)).astype('float16')
     def addInPlace(self, value1, value2):
@@ -16,9 +17,11 @@ class RowAccumulatorParam(AccumulatorParam):
         value1[i] += w_i
         return value1
 
-# class for H
 class ColAccumulatorParam(AccumulatorParam):
-    '''accumulator to add values to matrix column-wise'''
+    '''
+    accumulator to add values to matrix column-wise
+    for H
+    '''
     def zero(self, values):
         return np.zeros(len(values)).astype('float16')
     def addInPlace(self, value1, value2):
@@ -29,19 +32,31 @@ class ColAccumulatorParam(AccumulatorParam):
         value1[:,j] += h_j
         return value1
 
-# helper function used to check for nans originally
 def check_nans(x):
+    '''helper function to check for nans'''
     global nanchecker
     if np.isnan(x[1]).any():
         nanchecker += 1
 
-# action to call on W to cause update to be calculated (without collect())
-def coalesce_w(x):
+def parse_side(ln):
+    '''
+    function to read in side data
+    each line should be comma separated value with index, val1, val2, val3, etc.
+    '''
+    data = ln.split(',')
+    index = int(data[0])
+    side = []
+    for val in data[1:]:
+        side.append(float(val))
+    return (index, np.array(side).astype('float16'))
+
+def combine_w(x):
+    '''simple action to call on W to calculate updates'''
     global w_accum
     w_accum += 1
 
-# action to call on H to cause update to be calculated (without collect())
-def coalesce_h(x):
+def combine_h(x):
+    '''simple action to call on H to calculate updates'''
     global h_accum
     h_accum += 1
 
@@ -81,6 +96,7 @@ def SGD(x):
         # gradients with L2 loss
         # dictionary values are updated in place
         h_update = step_size.value*(-2*error*w_i + 2.0*reg.value*h_j)
+        h_update_mx = ma.masked_array(h_update, mask.value)
         w_update = step_size.value*(-2*error*h_j + 2.0*reg.value*w_i)
         h_j -= step_size.value*(-2*error*w_i + 2.0*reg.value*h_j)
         w_i -= step_size.value*(-2*error*h_j + 2.0*reg.value*w_i)
@@ -108,7 +124,7 @@ if __name__ == '__main__':
     cpus = sc.defaultParallelism
     # number of latent features
     k = 250
-    # max iterations; 1 epoch ~= cpus
+    # max iterations: 1 epoch ~= cpus
     max_iters = 10000
     # mses list
     mses = []
@@ -132,30 +148,33 @@ if __name__ == '__main__':
     '''LOAD SIDE DATA'''
     side_files = sc.textFile('s3a://github-recommender/side/*txt', cpus)
     # project side data
-    w_side = side_files.map(lambda x: (int(x.split(",")[0])-1, float(x.split(",")[1]))).groupByKey()
-    amount_side = len(w_side.first()[1])
+    h_side = side_files.map(parse_side)
+    len_side = h_side.first()[1].shape[0]
 
     '''SIDE DATA'''
     mask_values = [1]*k
-    mask_values.extend([0]*)
-    mask = sc.broadcast()
+    mask_values.extend([0]*len_side)
+    mask = sc.broadcast(mask_values)
 
     '''HALF PRECISION FLOATING POINT'''
     # 6.10352 × 10−5 (minimum positive normal)
     lower = 0.000610352
     upper = lower*10
 
-    '''INITIALIZE W AND H'''
+    '''INITIALIZE W AND H AND JOIN SIDE DATA'''
     # initialize W
     # first map gets tuples of (i, 1)
     # reduceByKey to get (unique row indices, number of 1's in that row)
     # second map create W with (i, row array))
-    w = v.map(lambda x: (x[0],1)).reduceByKey(lambda x,y: x+y).map(lambda x: (x[0], np.random.uniform(lower,upper,k).astype('float16')))
+    # add extra columns to W to learn with side data
+    w = v.map(lambda x: (x[0],1)).reduceByKey(lambda x,y: x+y).map(lambda x: (x[0], np.random.uniform(lower,upper,k+len_side).astype('float16')))
     # initialize H
     # first map gets tuples of (j, 1)
     # reduceByKey to get (unique column indices, number of 1's in that column)
     # second map create H with (j, column array))
-    h = v.map(lambda x: (x[1],1)).reduceByKey(lambda x,y: x+y).map(lambda x: (x[0], np.random.uniform(lower,upper,k).astype('float16')))
+    h_init = v.map(lambda x: (x[1],1)).reduceByKey(lambda x,y: x+y).map(lambda x: (x[0], np.random.uniform(lower,upper,k).astype('float16')))
+    # join side data
+    h = h_init.join(h_side).map(lambda x: (x[0], np.append(x[1][0], x[1][1])))
 
     '''CALCULATE ROWS, COLUMNS, BLOCK SIZE'''
     # number of users/rows
@@ -210,8 +229,8 @@ if __name__ == '__main__':
         w = w_h.filter(lambda x: x[0][0]=='W').map(lambda x: x[1]).persist()
         h = w_h.filter(lambda x: x[0][0]=='H').map(lambda x: x[1]).persist()
         # call action to actually compute this update!
-        w.foreach(coalesce_w)
-        h.foreach(coalesce_h)
+        w.foreach(combine_w)
+        h.foreach(combine_h)
         # append current MSE
         curr_mse = mse.value/n_updates_acc.value
         print("MSE/update for {}-th iteration is: {}".format(i, curr_mse))
