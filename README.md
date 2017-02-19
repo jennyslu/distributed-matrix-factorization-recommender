@@ -58,7 +58,7 @@ However, stochastic gradient descent is actually easier and faster than ALS and 
 
 In order to implement SGD in a distributed way, the crux of the solution lies in being able to find __interchangeable matrix blocks__ within _V_ such that for every two blocks, the row indices and column indices do not overlap. An example of this is shown below:
 
-![blocks](imgs/step1.png)
+![blocks](imgs/step1.PNG)
 
 ### 2. Perform SGD
 
@@ -103,4 +103,4 @@ I used Spark's ALS MF recommender as a benchmark. Convergence results cannot be 
 
 The addition of basic side data also improved MSE. This is also a useful feature that is available in Graphlab but not in MLlib.
 
-Finally, Spark's ALS implementation only provides max-iterations as termination criteria whereas this MF can also be terminated on both absolute and relative tolerance for error. 
+Finally, Spark's ALS implementation only provides max-iterations as termination criteria whereas this MF can also be terminated on both absolute and relative tolerance for error.
